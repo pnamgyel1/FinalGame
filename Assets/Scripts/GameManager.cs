@@ -8,7 +8,9 @@ public class GameManagerUI : MonoBehaviour
     public static GameManagerUI Instance { get; private set; }
 
     [Header("Gun Settings")]
-    public float gunRotationOffset = -90f; // adjust based on your sprite orientation
+    public float gunRotationOffset = -90f;
+    public float gunReturnSpeed = 1.5f; // lower = slower natural return
+    private Quaternion gunOriginalRotation;
 
     [Header("Scene Roots")]
     public Canvas mainCanvas;
@@ -19,11 +21,10 @@ public class GameManagerUI : MonoBehaviour
     [Header("Levels")]
     public GameObject[] levelObjects;       // Level1, Level2, ...
     public Image[] questionImages;          // Question_Level1, Question_Level2, ...
-    public RectTransform[] sentenceTargets; // SentenceTarget per level
 
     [Header("Gun / Flash")]
-    public RectTransform gun;               // reference to gun in current level
-    public Image gunFlash;                  // flash image child of gun
+    public RectTransform gun;
+    public Image gunFlash;
     public float flashDuration = 0.1f;
 
     [Header("HUD")]
@@ -33,17 +34,21 @@ public class GameManagerUI : MonoBehaviour
     [Header("Audio")]
     public AudioSource sfxSource;
     public AudioClip shootClip;
-    public AudioClip wrongClip;             // same for all levels
+    public AudioClip wrongClip;
 
     [Header("Gameplay Settings")]
     public int bulletsPerLevel = 3;
     public float restartDelay = 0.9f;
+    public float nextLevelDelay = 1.5f; // extra delay after letter fills
 
     int currentLevelIndex = 0;
     bool levelActive = false;
     bool levelCleared = false;
     int bulletsLeft = 0;
     List<BalloonUI> activeBalloons = new List<BalloonUI>();
+
+    // Auto-detected LetterSlots (instead of dragging manually)
+    private RectTransform[] sentenceTargets;
 
     void Awake()
     {
@@ -60,8 +65,22 @@ public class GameManagerUI : MonoBehaviour
             if (i < questionImages.Length && questionImages[i]) questionImages[i].gameObject.SetActive(false);
         }
 
-        StartLevel(0, true); // first level, play intro
+        // create storage for sentence targets
+        sentenceTargets = new RectTransform[levelObjects.Length];
+
+        StartLevel(0, true);
     }
+
+    void Update()
+    {
+        // Smoothly return gun to original rotation
+        if (gun != null && !gunReturningInstant)
+        {
+            gun.rotation = Quaternion.Slerp(gun.rotation, gunOriginalRotation, Time.deltaTime * gunReturnSpeed);
+        }
+    }
+
+    private bool gunReturningInstant = false;
 
     public void StartLevel(int index, bool playIntro = true)
     {
@@ -74,18 +93,18 @@ public class GameManagerUI : MonoBehaviour
 
         currentLevelIndex = index;
         levelCleared = false;
-        levelActive = false; // lock until intro finishes
+        levelActive = false;
         bulletsLeft = bulletsPerLevel;
         UpdateAmmoUI();
 
-        // reset any old dropped letters
+        // clear dropped letters
         if (droppedLettersRoot != null)
         {
             foreach (Transform child in droppedLettersRoot)
                 Destroy(child.gameObject);
         }
 
-        // cache balloons & gun for this level
+        // cache balloons
         activeBalloons.Clear();
         var level = levelObjects[currentLevelIndex].transform;
 
@@ -94,7 +113,7 @@ public class GameManagerUI : MonoBehaviour
         {
             foreach (Transform child in balloonsRoot)
             {
-                child.gameObject.SetActive(true); // reset popped balloons
+                child.gameObject.SetActive(true);
                 var b = child.GetComponent<BalloonUI>();
                 if (b != null)
                 {
@@ -104,15 +123,21 @@ public class GameManagerUI : MonoBehaviour
             }
         }
 
+        // cache gun
         gun = level.Find("Gun") as RectTransform;
         if (gun != null)
         {
             var flash = gun.Find("Flash");
             if (flash != null) gunFlash = flash.GetComponent<Image>();
             if (gunFlash != null) gunFlash.enabled = false;
+
+            gunOriginalRotation = gun.rotation; // store reset point
         }
 
-        // 🔊 Play intro line before allowing taps
+        // ✅ auto-detect the Sentence → LetterSlot for this level
+        DetectLetterSlot(index);
+
+        // 🔊 Play intro before enabling taps
         if (playIntro)
         {
             var intro = level.Find("LevelAudio")?.GetComponent<AudioSource>();
@@ -124,13 +149,31 @@ public class GameManagerUI : MonoBehaviour
             }
             else
             {
-                levelActive = true; // no intro, unlock immediately
+                levelActive = true;
             }
         }
         else
         {
-            // skip intro → unlock immediately
             levelActive = true;
+        }
+    }
+
+    private void DetectLetterSlot(int index)
+    {
+        if (index >= questionImages.Length) return;
+
+        var question = questionImages[index];
+        if (question == null) return;
+
+        var sentence = question.transform.Find("Sentence");
+        if (sentence != null)
+        {
+            var slot = sentence.Find("LetterSlot");
+            if (slot != null)
+            {
+                sentenceTargets[index] = slot as RectTransform;
+                Debug.Log($"[GameManagerUI] Auto-detected LetterSlot for level {index}");
+            }
         }
     }
 
@@ -153,11 +196,9 @@ public class GameManagerUI : MonoBehaviour
             gun.rotation = Quaternion.AngleAxis(angle + gunRotationOffset, Vector3.forward);
         }
 
-        // 🔥 flash + bang
         StartCoroutine(FlashGun());
         if (sfxSource && shootClip) sfxSource.PlayOneShot(shootClip);
 
-        // consume one shot
         bulletsLeft--;
         UpdateAmmoUI();
 
@@ -165,7 +206,7 @@ public class GameManagerUI : MonoBehaviour
         {
             levelCleared = true;
 
-            // ✅ play level-specific correct audio
+            // ✅ play correct audio
             var levelGO = levelObjects[currentLevelIndex];
             var correctAudio = levelGO.transform.Find("CorrectAudio")?.GetComponent<AudioSource>();
             if (correctAudio != null && correctAudio.clip != null)
@@ -178,19 +219,25 @@ public class GameManagerUI : MonoBehaviour
         }
         else
         {
-            // ❌ wrong answer sound
             if (sfxSource && wrongClip) sfxSource.PlayOneShot(wrongClip);
             StartCoroutine(FlashWrongSign());
-
-            // hide balloon
             b.gameObject.SetActive(false);
 
-            // if out of ammo now, restart
             if (bulletsLeft <= 0 && !levelCleared)
             {
                 StartCoroutine(RestartAfterDelay(restartDelay));
             }
         }
+
+        // start gun return after shot
+        StartCoroutine(ReturnGunSmoothly());
+    }
+
+    IEnumerator ReturnGunSmoothly()
+    {
+        gunReturningInstant = true;
+        yield return new WaitForSeconds(0.15f); // small pause after firing
+        gunReturningInstant = false; // Update() will smoothly rotate it back
     }
 
     IEnumerator FlashGun()
@@ -215,49 +262,55 @@ public class GameManagerUI : MonoBehaviour
 
     IEnumerator DropLetterThenNext(BalloonUI sourceBalloon)
     {
-        // create dropped letter
         if (droppedLettersRoot == null) droppedLettersRoot = mainCanvas.transform as RectTransform;
 
-        Sprite letterSprite = sourceBalloon.GetComponent<Image>()?.sprite;
-        if (letterSprite != null && droppedLettersRoot != null && questionImages.Length > currentLevelIndex)
+        Image letterImg = sourceBalloon.transform.Find("Letter")?.GetComponent<Image>();
+
+        if (letterImg != null && letterImg.sprite != null)
         {
-            RectTransform target = (sentenceTargets.Length > currentLevelIndex && sentenceTargets[currentLevelIndex] != null)
-                ? sentenceTargets[currentLevelIndex]
-                : questionImages[currentLevelIndex].rectTransform;
-
-            var dropGO = new GameObject("DroppedLetter", typeof(RectTransform), typeof(Image));
-            dropGO.transform.SetParent(droppedLettersRoot, false);
-            var dropRT = dropGO.GetComponent<RectTransform>();
-            var dropImage = dropGO.GetComponent<Image>();
-            dropImage.sprite = letterSprite;
-            dropRT.sizeDelta = new Vector2(120, 120);
-
-            RectTransform canvasRT = mainCanvas.GetComponent<RectTransform>();
-            Vector2 screenPoint = RectTransformUtility.WorldToScreenPoint(null, sourceBalloon.rectTransform.position);
-            Vector2 startLocal;
-            RectTransformUtility.ScreenPointToLocalPointInRectangle(canvasRT, screenPoint, null, out startLocal);
-            dropRT.anchoredPosition = startLocal;
-
-            Vector2 targetPos = target.anchoredPosition;
-            float t = 0f, dur = 0.45f;
-            while (t < dur)
+            RectTransform target = sentenceTargets[currentLevelIndex];
+            if (target == null)
             {
-                t += Time.deltaTime;
-                dropRT.anchoredPosition = Vector2.Lerp(startLocal, targetPos, t / dur);
-                yield return null;
+                Debug.LogWarning($"⚠ No LetterSlot found for level {currentLevelIndex}");
             }
-            dropRT.anchoredPosition = targetPos;
-            dropRT.SetParent(target, true);
+            else
+            {
+                var dropGO = new GameObject("DroppedLetter", typeof(RectTransform), typeof(Image));
+                dropGO.transform.SetParent(droppedLettersRoot, false);
+                var dropRT = dropGO.GetComponent<RectTransform>();
+                var dropImage = dropGO.GetComponent<Image>();
+                dropImage.sprite = letterImg.sprite;
+                dropImage.preserveAspect = true;
+
+                RectTransform canvasRT = mainCanvas.GetComponent<RectTransform>();
+                Vector2 screenPoint = RectTransformUtility.WorldToScreenPoint(null, letterImg.rectTransform.position);
+                Vector2 startLocal;
+                RectTransformUtility.ScreenPointToLocalPointInRectangle(canvasRT, screenPoint, null, out startLocal);
+                dropRT.anchoredPosition = startLocal;
+
+                // animate to slot
+                Vector2 targetPos = target.anchoredPosition;
+                float t = 0f, dur = 0.6f; // slightly longer animation
+                while (t < dur)
+                {
+                    t += Time.deltaTime;
+                    dropRT.anchoredPosition = Vector2.Lerp(startLocal, targetPos, t / dur);
+                    yield return null;
+                }
+                dropRT.SetParent(target, false);
+                dropRT.anchoredPosition = Vector2.zero;
+                dropRT.sizeDelta = target.sizeDelta;
+            }
         }
 
-        // hide balloon
         sourceBalloon.gameObject.SetActive(false);
 
-        yield return new WaitForSeconds(0.6f);
+        // ✅ Wait until letter fills + extra pause
+        yield return new WaitForSeconds(nextLevelDelay);
 
         int next = currentLevelIndex + 1;
         if (next < levelObjects.Length)
-            StartLevel(next, true); // next level, play intro
+            StartLevel(next, true);
         else
             GameFinished();
     }
@@ -267,7 +320,7 @@ public class GameManagerUI : MonoBehaviour
         yield return new WaitForSeconds(t);
         if (!levelCleared)
         {
-            StartLevel(currentLevelIndex, false); // restart without intro
+            StartLevel(currentLevelIndex, false);
         }
     }
 
@@ -284,6 +337,5 @@ public class GameManagerUI : MonoBehaviour
     {
         levelActive = false;
         Debug.Log("Game finished!");
-        // you can show a finish panel here if needed
     }
 }
