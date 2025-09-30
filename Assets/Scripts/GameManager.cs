@@ -2,6 +2,7 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
+using TMPro;
 
 public class GameManagerUI : MonoBehaviour
 {
@@ -9,46 +10,69 @@ public class GameManagerUI : MonoBehaviour
 
     [Header("Gun Settings")]
     public float gunRotationOffset = -90f;
-    public float gunReturnSpeed = 1.5f; // lower = slower natural return
-    private Quaternion gunOriginalRotation;
+    public float rotationSmoothSpeed = 8f;
+    public float gunReturnDelay = 0.15f;
+
+    private Quaternion gunOriginalRot;
+    private Quaternion targetGunRot;
+    private Coroutine returnCoroutine;
 
     [Header("Scene Roots")]
     public Canvas mainCanvas;
     public RectTransform levelsRoot;
     public RectTransform questionRoot;
     public RectTransform droppedLettersRoot;
+    public RectTransform bulletRoot;
 
     [Header("Levels")]
-    public GameObject[] levelObjects;       // Level1, Level2, ...
-    public Image[] questionImages;          // Question_Level1, Question_Level2, ...
+    public GameObject[] levelObjects;
+    public Image[] questionImages;
 
-    [Header("Gun / Flash")]
+    [Header("Gun/Visual")]
     public RectTransform gun;
+    public RectTransform firePoint;
     public Image gunFlash;
-    public float flashDuration = 0.1f;
+
+    [Header("Bullet (UI)")]
+    public Sprite bulletSprite;
+    public Vector2 bulletSize = new Vector2(40, 80);
+    public float bulletSpeed = 16f;
+    public bool rotateBulletToDirection = true;
+    public float bulletRotationOffset = 90f;
 
     [Header("HUD")]
-    public Image[] ammoIcons;               // ammo images (3)
+    public Image ammoIcon;
+    public TMP_Text ammoText;
     public GameObject wrongSignUI;
 
     [Header("Audio")]
     public AudioSource sfxSource;
     public AudioClip shootClip;
+    [Range(0f, 1f)] public float gunVolume = 0.5f;
     public AudioClip wrongClip;
+    public float wrongAudioDelay = 0.15f;
+    public float correctAudioDelay = 0.15f;
 
     [Header("Gameplay Settings")]
     public int bulletsPerLevel = 3;
     public float restartDelay = 0.9f;
-    public float nextLevelDelay = 1.5f; // extra delay after letter fills
+    public float nextLevelDelay = 1.5f;
 
+    [Header("Tutorial Settings")]
+    public float tutorialCorrectDelay = 2.5f;
+
+    [Header("Outro Settings")]
+    public AudioSource outroAudio;
+    public float outroExtraDelay = 0.1f;
+
+    // --- Internal state ---
     int currentLevelIndex = 0;
     bool levelActive = false;
     bool levelCleared = false;
     int bulletsLeft = 0;
     List<BalloonUI> activeBalloons = new List<BalloonUI>();
-
-    // Auto-detected LetterSlots (instead of dragging manually)
     private RectTransform[] sentenceTargets;
+    private Coroutine introCoroutine;
 
     void Awake()
     {
@@ -58,33 +82,52 @@ public class GameManagerUI : MonoBehaviour
 
     void Start()
     {
-        // deactivate all levels & questions at start
+        if (mainCanvas == null)
+        {
+            Debug.LogError("[GameManagerUI] Main Canvas is not set. Assign it in the inspector.");
+            return;
+        }
+
         for (int i = 0; i < levelObjects.Length; i++)
         {
             if (levelObjects[i]) levelObjects[i].SetActive(false);
             if (i < questionImages.Length && questionImages[i]) questionImages[i].gameObject.SetActive(false);
         }
 
-        // create storage for sentence targets
         sentenceTargets = new RectTransform[levelObjects.Length];
-
         StartLevel(0, true);
     }
 
     void Update()
     {
-        // Smoothly return gun to original rotation
-        if (gun != null && !gunReturningInstant)
+        if (gun != null)
         {
-            gun.rotation = Quaternion.Slerp(gun.rotation, gunOriginalRotation, Time.deltaTime * gunReturnSpeed);
+            gun.rotation = Quaternion.Slerp(
+                gun.rotation,
+                targetGunRot,
+                Time.deltaTime * rotationSmoothSpeed
+            );
         }
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        if (Input.GetKeyDown(KeyCode.Space) || Input.GetKeyDown(KeyCode.S))
+        {
+            if (introCoroutine != null)
+            {
+                StopCoroutine(introCoroutine);
+                introCoroutine = null;
+                var intro = levelObjects[currentLevelIndex].transform.Find("LevelAudio")?.GetComponent<AudioSource>();
+                if (intro != null) intro.Stop();
+                if (currentLevelIndex == 0) StartCoroutine(RunTutorialAfterIntro(0f));
+                else levelActive = true;
+            }
+        }
+#endif
     }
 
-    private bool gunReturningInstant = false;
-
+    // ---------- LEVEL FLOW ----------
     public void StartLevel(int index, bool playIntro = true)
     {
-        // deactivate others
         for (int i = 0; i < levelObjects.Length; i++)
         {
             if (levelObjects[i]) levelObjects[i].SetActive(i == index);
@@ -95,16 +138,15 @@ public class GameManagerUI : MonoBehaviour
         levelCleared = false;
         levelActive = false;
         bulletsLeft = bulletsPerLevel;
-        UpdateAmmoUI();
 
-        // clear dropped letters
+        if (index == 0) ToggleAmmoUI(false);
+        else UpdateAmmoUI();
+
         if (droppedLettersRoot != null)
         {
-            foreach (Transform child in droppedLettersRoot)
-                Destroy(child.gameObject);
+            foreach (Transform child in droppedLettersRoot) Destroy(child.gameObject);
         }
 
-        // cache balloons
         activeBalloons.Clear();
         var level = levelObjects[currentLevelIndex].transform;
 
@@ -123,57 +165,46 @@ public class GameManagerUI : MonoBehaviour
             }
         }
 
-        // cache gun
         gun = level.Find("Gun") as RectTransform;
         if (gun != null)
         {
+            firePoint = gun.Find("FirePoint") as RectTransform;
             var flash = gun.Find("Flash");
             if (flash != null) gunFlash = flash.GetComponent<Image>();
             if (gunFlash != null) gunFlash.enabled = false;
 
-            gunOriginalRotation = gun.rotation; // store reset point
+            gunOriginalRot = gun.rotation;
+            targetGunRot = gunOriginalRot;
         }
 
-        // ✅ auto-detect the Sentence → LetterSlot for this level
         DetectLetterSlot(index);
 
-        // 🔊 Play intro before enabling taps
         if (playIntro)
         {
             var intro = level.Find("LevelAudio")?.GetComponent<AudioSource>();
             if (intro != null && intro.clip != null)
             {
-                intro.Stop();
-                intro.Play();
-                StartCoroutine(EnableInteractionAfterAudio(intro.clip.length));
+                intro.Stop(); intro.Play();
+                if (index == 0) introCoroutine = StartCoroutine(RunTutorialAfterIntro(intro.clip.length));
+                else introCoroutine = StartCoroutine(EnableInteractionAfterAudio(intro.clip.length));
             }
-            else
-            {
-                levelActive = true;
-            }
+            else levelActive = true;
         }
-        else
-        {
-            levelActive = true;
-        }
+        else levelActive = true;
+
+        Debug.Log($"[GameManagerUI] Started Level {index}. BulletsLeft: {bulletsLeft}");
     }
 
     private void DetectLetterSlot(int index)
     {
         if (index >= questionImages.Length) return;
-
         var question = questionImages[index];
         if (question == null) return;
-
         var sentence = question.transform.Find("Sentence");
         if (sentence != null)
         {
             var slot = sentence.Find("LetterSlot");
-            if (slot != null)
-            {
-                sentenceTargets[index] = slot as RectTransform;
-                Debug.Log($"[GameManagerUI] Auto-detected LetterSlot for level {index}");
-            }
+            if (slot != null) sentenceTargets[index] = slot as RectTransform;
         }
     }
 
@@ -183,76 +214,173 @@ public class GameManagerUI : MonoBehaviour
         levelActive = true;
     }
 
+    IEnumerator RunTutorialAfterIntro(float delay)
+    {
+        yield return new WaitForSeconds(delay);
+
+        BalloonUI wrongBalloon = activeBalloons.Find(b => b != null && !b.isCorrect);
+        if (wrongBalloon != null)
+        {
+            StartCoroutine(PlayWrongAudioAfterDelay(wrongAudioDelay));
+            if (wrongSignUI != null) StartCoroutine(FlashWrongSign());
+
+            yield return StartCoroutine(RotateThenShoot(wrongBalloon));
+            wrongBalloon.gameObject.SetActive(false);
+        }
+
+        yield return new WaitForSeconds(tutorialCorrectDelay);
+
+        BalloonUI correctBalloon = activeBalloons.Find(b => b != null && b.isCorrect);
+        if (correctBalloon != null)
+        {
+            yield return StartCoroutine(RotateThenShoot(correctBalloon));
+            StartCoroutine(DropLetterThenNext(correctBalloon, autoAdvance: false));
+        }
+
+        yield return new WaitForSeconds(nextLevelDelay);
+        StartLevel(1, true);
+    }
+
+    // ---------- SHOOTING ----------
     public void OnBalloonTapped(BalloonUI b)
     {
         if (!levelActive || levelCleared) return;
         if (bulletsLeft <= 0) return;
 
-        // 🔫 rotate gun towards balloon
-        if (gun != null)
-        {
-            Vector3 dir = b.transform.position - gun.position;
-            float angle = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg;
-            gun.rotation = Quaternion.AngleAxis(angle + gunRotationOffset, Vector3.forward);
-        }
-
-        StartCoroutine(FlashGun());
-        if (sfxSource && shootClip) sfxSource.PlayOneShot(shootClip);
-
         bulletsLeft--;
         UpdateAmmoUI();
+        StartCoroutine(ShootAndHandle(b));
+    }
+
+    IEnumerator ShootAndHandle(BalloonUI b)
+    {
+        yield return StartCoroutine(RotateThenShoot(b));
 
         if (b.isCorrect)
         {
             levelCleared = true;
-
-            // ✅ play correct audio
-            var levelGO = levelObjects[currentLevelIndex];
-            var correctAudio = levelGO.transform.Find("CorrectAudio")?.GetComponent<AudioSource>();
-            if (correctAudio != null && correctAudio.clip != null)
-            {
-                correctAudio.Stop();
-                correctAudio.Play();
-            }
-
-            StartCoroutine(DropLetterThenNext(b));
+            if (currentLevelIndex > 0) StartCoroutine(PlayCorrectAudioAfterDelay(correctAudioDelay));
+            StartCoroutine(DropLetterThenNext(b, autoAdvance: currentLevelIndex != 0));
         }
         else
         {
-            if (sfxSource && wrongClip) sfxSource.PlayOneShot(wrongClip);
-            StartCoroutine(FlashWrongSign());
+            if (wrongClip != null) StartCoroutine(PlayWrongAudioAfterDelay(wrongAudioDelay));
+            if (wrongSignUI != null) StartCoroutine(FlashWrongSign());
+
             b.gameObject.SetActive(false);
 
             if (bulletsLeft <= 0 && !levelCleared)
-            {
                 StartCoroutine(RestartAfterDelay(restartDelay));
-            }
         }
 
-        // start gun return after shot
-        StartCoroutine(ReturnGunSmoothly());
+        if (returnCoroutine != null) StopCoroutine(returnCoroutine);
+        returnCoroutine = StartCoroutine(ReturnGunToOriginalAfterDelay(gunReturnDelay));
     }
 
-    IEnumerator ReturnGunSmoothly()
+    IEnumerator RotateThenShoot(BalloonUI target)
     {
-        gunReturningInstant = true;
-        yield return new WaitForSeconds(0.15f); // small pause after firing
-        gunReturningInstant = false; // Update() will smoothly rotate it back
+        if (gun == null) yield break;
+
+        Vector3 dir = target.transform.position - gun.position;
+        float angle = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg + gunRotationOffset;
+        targetGunRot = Quaternion.Euler(0, 0, angle);
+
+        while (Quaternion.Angle(gun.rotation, targetGunRot) > 1f)
+            yield return null;
+
+        if (gunFlash != null) StartCoroutine(FlashGun());
+        if (sfxSource && shootClip) sfxSource.PlayOneShot(shootClip, gunVolume);
+        yield return StartCoroutine(ShootBulletToTarget(target));
+    }
+
+    IEnumerator ShootBulletToTarget(BalloonUI targetBalloon)
+    {
+        if (bulletSprite == null) yield break;
+        if (gun == null || firePoint == null) yield break;
+
+        var bulletGO = new GameObject("Bullet(Clone)", typeof(RectTransform), typeof(Image));
+        bulletGO.transform.SetParent(bulletRoot != null ? bulletRoot : mainCanvas.transform, false);
+        var bulletRT = bulletGO.GetComponent<RectTransform>();
+        var bulletImg = bulletGO.GetComponent<Image>();
+        bulletImg.sprite = bulletSprite;
+        bulletImg.preserveAspect = true;
+        bulletImg.raycastTarget = false;
+        bulletRT.sizeDelta = bulletSize;
+
+        Vector3 startWorld = firePoint.position;
+        Vector3 targetWorld = targetBalloon.transform.position;
+        bulletRT.position = startWorld;
+
+        bulletRT.rotation = gun.rotation;
+
+        float dist = Vector3.Distance(startWorld, targetWorld);
+        float duration = Mathf.Max(0.05f, dist / bulletSpeed);
+        float elapsed = 0f;
+        Vector3 prevPos = startWorld;
+
+        // use target balloon center as "hit radius"
+        float hitRadius = 40f; // adjust depending on balloon size
+
+        while (elapsed < duration)
+        {
+            elapsed += Time.deltaTime;
+            float t = Mathf.Clamp01(elapsed / duration);
+
+            Vector3 newPos = Vector3.Lerp(startWorld, targetWorld, t);
+            bulletRT.position = newPos;
+
+            if (rotateBulletToDirection)
+            {
+                Vector3 moveDir = (newPos - prevPos).normalized;
+                if (moveDir.sqrMagnitude > 0.0001f)
+                {
+                    float angle = Mathf.Atan2(moveDir.y, moveDir.x) * Mathf.Rad2Deg + bulletRotationOffset;
+                    bulletRT.rotation = Quaternion.Euler(0, 0, angle);
+                }
+            }
+            prevPos = newPos;
+
+            // --- check collision with balloon ---
+            if (Vector3.Distance(newPos, targetBalloon.transform.position) <= hitRadius)
+            {
+                break; // hit → exit early
+            }
+
+            yield return null;
+        }
+
+        Destroy(bulletGO);
+    }
+
+    // ---------- GUN ROTATION ----------
+    private void SmoothRotateGunTo(Vector3 targetWorldPos)
+    {
+        if (gun == null) return;
+        Vector3 dir = targetWorldPos - gun.position;
+        float angle = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg + gunRotationOffset;
+        targetGunRot = Quaternion.Euler(0, 0, angle);
+    }
+
+    IEnumerator ReturnGunToOriginalAfterDelay(float delay)
+    {
+        yield return new WaitForSeconds(delay);
+        targetGunRot = gunOriginalRot;
+        while (Quaternion.Angle(gun.rotation, targetGunRot) > 0.5f)
+            yield return null;
+        returnCoroutine = null;
     }
 
     IEnumerator FlashGun()
     {
-        if (gunFlash != null)
-        {
-            gunFlash.enabled = true;
-            yield return new WaitForSeconds(flashDuration);
-            gunFlash.enabled = false;
-        }
+        if (gunFlash == null) yield break;
+        gunFlash.enabled = true;
+        yield return new WaitForSeconds(0.1f);
+        gunFlash.enabled = false;
     }
 
     IEnumerator FlashWrongSign()
     {
-        if (wrongSignUI)
+        if (wrongSignUI != null)
         {
             wrongSignUI.SetActive(true);
             yield return new WaitForSeconds(0.6f);
@@ -260,20 +388,32 @@ public class GameManagerUI : MonoBehaviour
         }
     }
 
-    IEnumerator DropLetterThenNext(BalloonUI sourceBalloon)
+    IEnumerator PlayWrongAudioAfterDelay(float delay)
+    {
+        yield return new WaitForSeconds(delay);
+        if (sfxSource && wrongClip) sfxSource.PlayOneShot(wrongClip);
+    }
+
+    IEnumerator PlayCorrectAudioAfterDelay(float delay)
+    {
+        yield return new WaitForSeconds(delay);
+        var levelGO = levelObjects[currentLevelIndex];
+        var correctAudio = levelGO.transform.Find("CorrectAudio")?.GetComponent<AudioSource>();
+        if (correctAudio != null && correctAudio.clip != null)
+        {
+            correctAudio.Stop(); correctAudio.Play();
+        }
+    }
+
+    IEnumerator DropLetterThenNext(BalloonUI sourceBalloon, bool autoAdvance = true)
     {
         if (droppedLettersRoot == null) droppedLettersRoot = mainCanvas.transform as RectTransform;
-
         Image letterImg = sourceBalloon.transform.Find("Letter")?.GetComponent<Image>();
 
         if (letterImg != null && letterImg.sprite != null)
         {
             RectTransform target = sentenceTargets[currentLevelIndex];
-            if (target == null)
-            {
-                Debug.LogWarning($"⚠ No LetterSlot found for level {currentLevelIndex}");
-            }
-            else
+            if (target != null)
             {
                 var dropGO = new GameObject("DroppedLetter", typeof(RectTransform), typeof(Image));
                 dropGO.transform.SetParent(droppedLettersRoot, false);
@@ -288,9 +428,8 @@ public class GameManagerUI : MonoBehaviour
                 RectTransformUtility.ScreenPointToLocalPointInRectangle(canvasRT, screenPoint, null, out startLocal);
                 dropRT.anchoredPosition = startLocal;
 
-                // animate to slot
                 Vector2 targetPos = target.anchoredPosition;
-                float t = 0f, dur = 0.6f; // slightly longer animation
+                float t = 0f, dur = 0.6f;
                 while (t < dur)
                 {
                     t += Time.deltaTime;
@@ -304,38 +443,59 @@ public class GameManagerUI : MonoBehaviour
         }
 
         sourceBalloon.gameObject.SetActive(false);
-
-        // ✅ Wait until letter fills + extra pause
         yield return new WaitForSeconds(nextLevelDelay);
 
-        int next = currentLevelIndex + 1;
-        if (next < levelObjects.Length)
-            StartLevel(next, true);
-        else
-            GameFinished();
+        if (autoAdvance)
+        {
+            int next = currentLevelIndex + 1;
+            if (next < levelObjects.Length) StartLevel(next, true);
+            else GameFinished();
+        }
     }
 
     IEnumerator RestartAfterDelay(float t)
     {
         yield return new WaitForSeconds(t);
-        if (!levelCleared)
-        {
-            StartLevel(currentLevelIndex, false);
-        }
+        if (!levelCleared) StartLevel(currentLevelIndex, false);
     }
 
     void UpdateAmmoUI()
     {
-        if (ammoIcons == null) return;
-        for (int i = 0; i < ammoIcons.Length; i++)
-        {
-            if (ammoIcons[i]) ammoIcons[i].gameObject.SetActive(i < bulletsLeft);
-        }
+        if (ammoText == null) return;
+        if (currentLevelIndex == 0) { ToggleAmmoUI(false); return; }
+        ToggleAmmoUI(true);
+        ammoText.text = "x" + bulletsLeft;
+    }
+
+    private void ToggleAmmoUI(bool visible)
+    {
+        if (ammoIcon != null) ammoIcon.gameObject.SetActive(visible);
+        if (ammoText != null) ammoText.gameObject.SetActive(visible);
     }
 
     void GameFinished()
     {
         levelActive = false;
         Debug.Log("Game finished!");
+        StartCoroutine(PlayOutroAfterCorrect());
+    }
+
+    IEnumerator PlayOutroAfterCorrect()
+    {
+        var levelGO = levelObjects[currentLevelIndex];
+        var correctAudio = levelGO.transform.Find("CorrectAudio")?.GetComponent<AudioSource>();
+        float waitTime = 0f;
+
+        if (correctAudio != null && correctAudio.clip != null)
+        {
+            if (correctAudio.isPlaying) waitTime = correctAudio.clip.length - correctAudio.time;
+            else waitTime = correctAudio.clip.length;
+        }
+
+        yield return new WaitForSeconds(waitTime + outroExtraDelay);
+        if (outroAudio != null && outroAudio.clip != null)
+        {
+            outroAudio.Stop(); outroAudio.Play();
+        }
     }
 }
