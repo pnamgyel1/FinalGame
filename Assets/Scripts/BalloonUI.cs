@@ -5,8 +5,7 @@ using UnityEngine.UI;
 public class BalloonUI : MonoBehaviour, IPointerClickHandler
 {
     [Header("Balloon Settings")]
-    public bool isCorrect = false;       // Mark this true if this balloon is the correct answer
-    public Image letterImage;            // Child Image with the Dzongkha letter sprite
+    public bool isCorrect = false; // Marks if this balloon is the correct answer
 
     [HideInInspector] public RectTransform rectTransform;
 
@@ -14,34 +13,22 @@ public class BalloonUI : MonoBehaviour, IPointerClickHandler
     {
         rectTransform = GetComponent<RectTransform>();
 
-        // Make sure balloon background is clickable
+        // Ensure the balloon image receives clicks
         var img = GetComponent<Image>();
         if (img) img.raycastTarget = true;
-
-        // Auto-find child named "Letter" if not assigned
-        if (letterImage == null)
-        {
-            var child = transform.Find("Letter");
-            if (child != null)
-                letterImage = child.GetComponent<Image>();
-        }
     }
 
-    // Called by GameManager during level setup (kept for compatibility)
-    public void Register() { }
+    // Reset balloon when level restarts
+    public void Register()
+    {
+        gameObject.SetActive(true);
+        if (rectTransform != null)
+            rectTransform.localScale = Vector3.one;
+    }
 
-    // Called when balloon is tapped
+    // Handle balloon tap
     public void OnPointerClick(PointerEventData eventData)
     {
-        if (GameManagerUI.Instance != null)
-        {
-            GameManagerUI.Instance.OnBalloonTapped(this);
-        }
-    }
-
-    // Provide the letter sprite to GameManager
-    public Sprite GetLetterSprite()
-    {
-        return letterImage != null ? letterImage.sprite : null;
+        GameManagerUI.Instance?.OnBalloonTapped(this);
     }
 }
