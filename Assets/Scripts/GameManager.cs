@@ -4,9 +4,6 @@ using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
 
-/// <summary>
-/// Manages UI-based balloon shooting gameplay and level flow
-/// </summary>
 public class GameManagerUI : MonoBehaviour
 {
     public static GameManagerUI Instance { get; private set; }
@@ -65,40 +62,31 @@ public class GameManagerUI : MonoBehaviour
     public int bulletsPerLevel = 3;
     public float restartDelay = 0.9f;
     public float nextLevelDelay = 1.5f;
+    public float tutorialStartDelay = 0.3f;
 
     [Header("Tutorial Settings")]
     public float tutorialCorrectDelay = 2.5f;
-
-    [Header("Outro Settings")]
-    public AudioSource outroAudio;
-    public float outroExtraDelay = 0.1f;
-
-    [Header("Options")]
-    [Tooltip("Play outro audio after the final level.")]
-    public bool playOutroAfterLastLevel = true;
 
     #endregion
 
     #region Private Fields
 
-    int currentLevelIndex = 0;
-    bool levelActive = false;
-    bool levelCleared = false;
-    int bulletsLeft = 0;
-    bool isProcessingShot = false;
-    bool isRestarting = false;
+    int currentLevelIndex;
+    bool levelActive;
+    bool levelCleared;
+    int bulletsLeft;
+    bool isProcessingShot;
+    bool isRestarting;
 
     List<BalloonUI> activeBalloons = new List<BalloonUI>();
     RectTransform[] sentenceTargets;
     AudioSource currentLevelCorrectAudioSource;
-    int remainingCorrectThisLevel = 0;
+    int remainingCorrectThisLevel;
 
     Quaternion gunOriginalRot;
     Quaternion targetGunRot;
     Coroutine returnCoroutine;
     Coroutine rotationCoroutine;
-    Coroutine introCoroutine;
-
     List<Coroutine> runningCoroutines = new List<Coroutine>();
 
     #endregion
@@ -113,39 +101,23 @@ public class GameManagerUI : MonoBehaviour
 
     void Start()
     {
-        if (mainCanvas == null)
+        if (!mainCanvas)
         {
             Debug.LogError("[GameManagerUI] Main Canvas missing!");
             return;
         }
 
+        if (levelObjects == null) levelObjects = new GameObject[0];
+        if (questionImages == null) questionImages = new Image[0];
+
         for (int i = 0; i < levelObjects.Length; i++)
         {
             if (levelObjects[i]) levelObjects[i].SetActive(false);
-            if (i < questionImages.Length && questionImages[i]) questionImages[i].gameObject.SetActive(false);
+            if (i < questionImages.Length && questionImages[i])
+                questionImages[i].gameObject.SetActive(false);
         }
 
         sentenceTargets = new RectTransform[Mathf.Max(1, levelObjects.Length)];
-        StartLevel(0, true);
-    }
-
-    void Update()
-    {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-        // Skip intro audio with Space/S
-        if (Input.GetKeyDown(KeyCode.Space) || Input.GetKeyDown(KeyCode.S))
-        {
-            if (introCoroutine != null)
-            {
-                StopCoroutine(introCoroutine);
-                introCoroutine = null;
-                var intro = levelObjects[currentLevelIndex].transform.Find("LevelAudio")?.GetComponent<AudioSource>();
-                if (intro) intro.Stop();
-                if (currentLevelIndex == 0) StartCoroutine(RunTutorialAfterIntro(0f));
-                else levelActive = true;
-            }
-        }
-#endif
     }
 
     #endregion
@@ -159,12 +131,18 @@ public class GameManagerUI : MonoBehaviour
         isProcessingShot = false;
         isRestarting = false;
 
-        if (returnCoroutine != null) { StopCoroutine(returnCoroutine); returnCoroutine = null; }
+        if (returnCoroutine != null)
+        {
+            StopCoroutine(returnCoroutine);
+            returnCoroutine = null;
+        }
 
+        // Activate only requested level
         for (int i = 0; i < levelObjects.Length; i++)
         {
             if (levelObjects[i]) levelObjects[i].SetActive(i == index);
-            if (i < questionImages.Length && questionImages[i]) questionImages[i].gameObject.SetActive(i == index);
+            if (i < questionImages.Length && questionImages[i])
+                questionImages[i].gameObject.SetActive(i == index);
         }
 
         currentLevelIndex = index;
@@ -175,8 +153,10 @@ public class GameManagerUI : MonoBehaviour
         if (index == 0) ToggleAmmoUI(false);
         else UpdateAmmoUI();
 
+        // Clear dropped letters
         if (droppedLettersRoot)
-            foreach (Transform child in droppedLettersRoot) Destroy(child.gameObject);
+            foreach (Transform child in droppedLettersRoot)
+                Destroy(child.gameObject);
 
         SetupBalloons(index);
         SetupGun(index);
@@ -184,24 +164,31 @@ public class GameManagerUI : MonoBehaviour
 
         if (playIntro)
         {
-            var intro = levelObjects[index].transform.Find("LevelAudio")?.GetComponent<AudioSource>();
-            if (intro && intro.clip)
+            var intro = SafeFindLevelAudio(index);
+            if (intro != null && intro.clip != null)
             {
-                intro.Stop(); intro.Play();
-                introCoroutine = (index == 0)
-                    ? StartCoroutine(RunTutorialAfterIntro(intro.clip.length))
-                    : StartCoroutine(EnableInteractionAfterAudio(intro.clip.length));
+                SafePlay(intro, stopFirst: true);
+                StartCoroutine(WaitForIntroThenStartTutorial(intro));
             }
-            else levelActive = true;
+            else
+                levelActive = true;
         }
-        else levelActive = true;
+        else
+        {
+            // For level 0 without intro (called by IntroOutroManager after intro2 ends)
+            if (index == 0)
+                StartCoroutine(RunTutorialAfterIntro(tutorialStartDelay));
+            else
+                levelActive = true;
+        }
     }
 
     void SetupBalloons(int index)
     {
         activeBalloons.Clear();
-        var level = levelObjects[index].transform;
-        var balloonsRoot = level.Find("Balloons");
+        if (levelObjects == null || index < 0 || index >= levelObjects.Length) return;
+
+        var balloonsRoot = levelObjects[index].transform.Find("Balloons");
         if (!balloonsRoot) return;
 
         foreach (Transform child in balloonsRoot)
@@ -219,31 +206,31 @@ public class GameManagerUI : MonoBehaviour
 
         remainingCorrectThisLevel = 0;
         foreach (var b in activeBalloons)
-            if (b.isCorrect) remainingCorrectThisLevel++;
+            if (b != null && b.isCorrect) remainingCorrectThisLevel++;
 
-        currentLevelCorrectAudioSource = level.Find("CorrectAudio")?.GetComponent<AudioSource>();
+        currentLevelCorrectAudioSource = levelObjects[index].transform.Find("CorrectAudio")?.GetComponent<AudioSource>();
     }
 
     void SetupGun(int index)
     {
-        var level = levelObjects[index].transform;
-        gun = level.Find("Gun") as RectTransform;
-        if (!gun) return;
+        if (levelObjects == null || index < 0 || index >= levelObjects.Length) { gun = null; firePoint = null; return; }
+
+        gun = levelObjects[index].transform.Find("Gun") as RectTransform;
+        if (!gun) { firePoint = null; return; }
 
         firePoint = gun.Find("FirePoint") as RectTransform;
         gunOriginalRot = gun.rotation;
         targetGunRot = gunOriginalRot;
-        gun.rotation = gunOriginalRot;
     }
 
     void DetectLetterSlot(int index)
     {
         if (index >= questionImages.Length) return;
+
         var q = questionImages[index];
         if (!q) return;
-        var sentence = q.transform.Find("Sentence");
-        if (!sentence) return;
-        var slot = sentence.Find("LetterSlot");
+
+        var slot = q.transform.Find("Sentence/LetterSlot");
         if (slot) sentenceTargets[index] = slot as RectTransform;
     }
 
@@ -265,58 +252,66 @@ public class GameManagerUI : MonoBehaviour
         }
 
         if (droppedLettersRoot)
-            foreach (Transform child in droppedLettersRoot) Destroy(child.gameObject);
+            foreach (Transform child in droppedLettersRoot)
+                Destroy(child.gameObject);
 
         isProcessingShot = false;
         isRestarting = false;
     }
 
-    IEnumerator RestartAfterDelay(float t)
-    {
-        yield return new WaitForSeconds(t);
-        if (!levelCleared) StartLevel(currentLevelIndex, false);
-    }
-
-    IEnumerator EnableInteractionAfterAudio(float delay)
-    {
-        yield return new WaitForSeconds(delay);
-        levelActive = true;
-    }
-
     void GameFinished()
     {
         levelActive = false;
-        StartCoroutine(PlayOutroAfterCorrect());
+        IntroOutroManager.Instance?.PlayOutro();
     }
 
     #endregion
 
-    #region Tutorial
+    #region Intro & Tutorial
 
-    IEnumerator RunTutorialAfterIntro(float delay)
+    IEnumerator WaitForIntroThenStartTutorial(AudioSource intro)
+    {
+        if (!CanPlay(intro))
+        {
+            yield return RunTutorialAfterIntro(tutorialStartDelay);
+            yield break;
+        }
+
+        yield return new WaitWhile(() => intro != null && intro.isPlaying);
+
+        if (currentLevelIndex == 0)
+            yield return RunTutorialAfterIntro(tutorialStartDelay);
+        else
+            levelActive = true;
+    }
+
+    public IEnumerator RunTutorialAfterIntro(float delay)
     {
         yield return new WaitForSeconds(delay);
+        levelActive = false;
 
-        BalloonUI wrong = activeBalloons.Find(b => !b.isCorrect);
+        // Shoot wrong balloon
+        BalloonUI wrong = activeBalloons.Find(b => b != null && !b.isCorrect);
         if (wrong)
         {
             yield return RotateThenShoot(wrong);
-            if (sfxSource && balloonPopClip) sfxSource.PlayOneShot(balloonPopClip, balloonPopVolume);
+            SafePlayOneShotOnSfx(balloonPopClip, balloonPopVolume);
             wrong.gameObject.SetActive(false);
-            if (wrongClip) StartCoroutine(PlayWrongAudioAfterDelay(wrongAudioDelay));
+            if (wrongClip) StartManagedCoroutine(PlayWrongAudioAfterDelay(wrongAudioDelay));
         }
 
         yield return new WaitForSeconds(tutorialCorrectDelay);
 
-        BalloonUI correct = activeBalloons.Find(b => b.isCorrect);
+        // Shoot correct balloon
+        BalloonUI correct = activeBalloons.Find(b => b != null && b.isCorrect);
         if (correct)
         {
             yield return RotateThenShoot(correct);
-            if (sfxSource && balloonPopClip) sfxSource.PlayOneShot(balloonPopClip, balloonPopVolume);
+            SafePlayOneShotOnSfx(balloonPopClip, balloonPopVolume);
             correct.gameObject.SetActive(false);
-            if (sfxSource && tutorialCorrectClip) sfxSource.PlayOneShot(tutorialCorrectClip, tutorialCorrectVolume);
-            remainingCorrectThisLevel--;
-            StartCoroutine(DropLetterThenNext(correct, false));
+            SafePlayOneShotOnSfx(tutorialCorrectClip, tutorialCorrectVolume);
+            if (remainingCorrectThisLevel > 0) remainingCorrectThisLevel--;
+            StartManagedCoroutine(DropLetterThenNext(correct, false));
         }
 
         yield return new WaitForSeconds(nextLevelDelay);
@@ -330,6 +325,7 @@ public class GameManagerUI : MonoBehaviour
     public void OnBalloonTapped(BalloonUI b)
     {
         if (!levelActive || levelCleared || bulletsLeft <= 0 || isProcessingShot || isRestarting) return;
+
         if (returnCoroutine != null) { StopCoroutine(returnCoroutine); returnCoroutine = null; }
 
         isProcessingShot = true;
@@ -345,13 +341,15 @@ public class GameManagerUI : MonoBehaviour
     IEnumerator ShootAndHandle(BalloonUI b)
     {
         yield return RotateThenShoot(b);
-        if (sfxSource && balloonPopClip) sfxSource.PlayOneShot(balloonPopClip, balloonPopVolume);
-        if (currentLevelIndex > 0 && b.isActiveAndEnabled) yield return PopBalloonAnimation(b);
+        SafePlayOneShotOnSfx(balloonPopClip, balloonPopVolume);
+
+        if (currentLevelIndex > 0 && b.isActiveAndEnabled)
+            yield return PopBalloonAnimation(b);
 
         if (b.isCorrect)
         {
-            remainingCorrectThisLevel--;
-            if (currentLevelCorrectAudioSource && currentLevelCorrectAudioSource.clip)
+            if (remainingCorrectThisLevel > 0) remainingCorrectThisLevel--;
+            if (CanPlay(currentLevelCorrectAudioSource))
             {
                 currentLevelCorrectAudioSource.Stop();
                 currentLevelCorrectAudioSource.Play();
@@ -361,14 +359,16 @@ public class GameManagerUI : MonoBehaviour
         }
         else
         {
-            if (wrongClip) StartCoroutine(PlayWrongAudioAfterDelay(wrongAudioDelay));
+            if (wrongClip) StartManagedCoroutine(PlayWrongAudioAfterDelay(wrongAudioDelay));
             b.gameObject.SetActive(false);
+
             if (bulletsLeft <= 0 && !levelCleared)
             {
                 if (outOfAmmoClip && sfxSource)
                 {
-                    isRestarting = true; levelActive = false;
-                    sfxSource.PlayOneShot(outOfAmmoClip, outOfAmmoVolume);
+                    isRestarting = true;
+                    levelActive = false;
+                    SafePlayOneShotOnSfx(outOfAmmoClip, outOfAmmoVolume);
                     yield return new WaitForSeconds(outOfAmmoClip.length);
                     ResetLevelStateBeforeRestart();
                     StartLevel(currentLevelIndex, false);
@@ -376,7 +376,7 @@ public class GameManagerUI : MonoBehaviour
                     isProcessingShot = false;
                     yield break;
                 }
-                else StartCoroutine(RestartAfterDelay(restartDelay));
+                else StartManagedCoroutine(RestartAfterDelay(restartDelay));
             }
         }
 
@@ -397,8 +397,7 @@ public class GameManagerUI : MonoBehaviour
 
         StopRotationCoroutine();
         yield return RotateTo(targetGunRot);
-
-        if (sfxSource && shootClip) sfxSource.PlayOneShot(shootClip, gunVolume);
+        SafePlayOneShotOnSfx(shootClip, gunVolume);
         yield return ShootBulletToTarget(target);
     }
 
@@ -409,20 +408,23 @@ public class GameManagerUI : MonoBehaviour
         RectTransform canvasRT = mainCanvas.GetComponent<RectTransform>();
         Camera cam = mainCanvas.worldCamera;
 
-        Vector2 startLocal, targetLocal;
         RectTransformUtility.ScreenPointToLocalPointInRectangle(canvasRT,
-            RectTransformUtility.WorldToScreenPoint(cam, firePoint.position), cam, out startLocal);
+            RectTransformUtility.WorldToScreenPoint(cam, firePoint.position), cam, out var startLocal);
         RectTransformUtility.ScreenPointToLocalPointInRectangle(canvasRT,
-            RectTransformUtility.WorldToScreenPoint(cam, targetBalloon.transform.position), cam, out targetLocal);
+            RectTransformUtility.WorldToScreenPoint(cam, targetBalloon.transform.position), cam, out var targetLocal);
 
         var bullet = new GameObject("Bullet(Clone)", typeof(RectTransform), typeof(Image));
         bullet.transform.SetParent(bulletRoot ? bulletRoot : mainCanvas.transform, false);
 
         var rt = bullet.GetComponent<RectTransform>();
         var img = bullet.GetComponent<Image>();
-        img.sprite = bulletSprite; img.preserveAspect = true; img.raycastTarget = false;
-        rt.sizeDelta = bulletSize; rt.localScale = Vector3.one;
-        rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f); rt.anchoredPosition = startLocal;
+        img.sprite = bulletSprite;
+        img.preserveAspect = true;
+        img.raycastTarget = false;
+        rt.sizeDelta = bulletSize;
+        rt.localScale = Vector3.one;
+        rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
+        rt.anchoredPosition = startLocal;
 
         if (rotateBulletToDirection)
         {
@@ -484,7 +486,7 @@ public class GameManagerUI : MonoBehaviour
 
     #endregion
 
-    #region Animations
+    #region Animations & Drops
 
     IEnumerator PopBalloonAnimation(BalloonUI balloon)
     {
@@ -506,6 +508,7 @@ public class GameManagerUI : MonoBehaviour
     IEnumerator DropLetterThenNext(BalloonUI sourceBalloon, bool autoAdvance = true)
     {
         if (!droppedLettersRoot) droppedLettersRoot = mainCanvas.transform as RectTransform;
+
         Image letterImg = sourceBalloon.transform.Find("Letter")?.GetComponent<Image>();
         if (letterImg && letterImg.sprite)
         {
@@ -514,6 +517,7 @@ public class GameManagerUI : MonoBehaviour
             {
                 var drop = new GameObject("DroppedLetter", typeof(RectTransform), typeof(Image));
                 drop.transform.SetParent(droppedLettersRoot, false);
+
                 var rt = drop.GetComponent<RectTransform>();
                 var img = drop.GetComponent<Image>();
                 img.sprite = letterImg.sprite;
@@ -547,33 +551,25 @@ public class GameManagerUI : MonoBehaviour
         {
             int next = currentLevelIndex + 1;
             if (next < levelObjects.Length) StartLevel(next, true);
-            else if (playOutroAfterLastLevel) GameFinished();
+            else GameFinished();
         }
     }
-
-    #endregion
-
-    #region Audio
 
     IEnumerator PlayWrongAudioAfterDelay(float delay)
     {
         yield return new WaitForSeconds(delay);
-        if (sfxSource && wrongClip) sfxSource.PlayOneShot(wrongClip);
+        SafePlayOneShotOnSfx(wrongClip, 1f);
     }
 
-    IEnumerator PlayOutroAfterCorrect()
+    IEnumerator RestartAfterDelay(float delay)
     {
-        var correctAudio = levelObjects[currentLevelIndex].transform.Find("CorrectAudio")?.GetComponent<AudioSource>();
-        float wait = 0f;
-        if (correctAudio && correctAudio.clip)
-            wait = correctAudio.isPlaying ? correctAudio.clip.length - correctAudio.time : correctAudio.clip.length;
-        yield return new WaitForSeconds(wait + outroExtraDelay);
-        if (outroAudio && outroAudio.clip) { outroAudio.Stop(); outroAudio.Play(); }
+        yield return new WaitForSeconds(delay);
+        if (!levelCleared) StartLevel(currentLevelIndex, false);
     }
 
     #endregion
 
-    #region UI
+    #region UI Helpers
 
     void UpdateAmmoUI()
     {
@@ -591,22 +587,52 @@ public class GameManagerUI : MonoBehaviour
 
     #endregion
 
+    #region Audio Helpers
+
+    bool CanPlay(AudioSource a) => a != null && a.isActiveAndEnabled && a.gameObject.activeInHierarchy;
+
+    void SafePlay(AudioSource a, bool stopFirst = false)
+    {
+        if (!CanPlay(a)) return;
+        if (stopFirst) a.Stop();
+        a.Play();
+    }
+
+    void SafePlayOneShotOnSfx(AudioClip clip, float volume = 1f)
+    {
+        if (clip == null || sfxSource == null || !CanPlay(sfxSource)) return;
+        sfxSource.PlayOneShot(clip, Mathf.Clamp01(volume));
+    }
+
+    AudioSource SafeFindLevelAudio(int levelIndex)
+    {
+        if (levelIndex < 0 || levelIndex >= levelObjects.Length || levelObjects[levelIndex] == null) return null;
+        var audioTransform = levelObjects[levelIndex].transform.Find("LevelAudio");
+        return audioTransform?.GetComponent<AudioSource>();
+    }
+
+    #endregion
+
     #region Coroutine Management
 
     Coroutine StartManagedCoroutine(IEnumerator e)
     {
-        var c = StartCoroutine(e);
+        Coroutine c = null;
+        IEnumerator Wrapper()
+        {
+            yield return StartCoroutine(e);
+            if (c != null) runningCoroutines.Remove(c);
+        }
+        c = StartCoroutine(Wrapper());
         runningCoroutines.Add(c);
         return c;
     }
 
     void StopAllManagedCoroutines()
     {
-        foreach (var c in runningCoroutines) if (c != null) StopCoroutine(c);
+        foreach (var c in runningCoroutines)
+            if (c != null) StopCoroutine(c);
         runningCoroutines.Clear();
-        if (introCoroutine != null) { StopCoroutine(introCoroutine); introCoroutine = null; }
-        if (returnCoroutine != null) { StopCoroutine(returnCoroutine); returnCoroutine = null; }
-        StopRotationCoroutine();
     }
 
     #endregion
